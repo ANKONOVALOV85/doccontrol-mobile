@@ -1,0 +1,795 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
+import plotly.express as px
+import plotly.graph_objects as go
+import os
+import requests
+from io import BytesIO
+import hashlib
+import tempfile
+import re
+
+# --- Настройка страницы (мобильная) ---
+st.set_page_config(
+    page_title="DocControl Mobile",
+    page_icon="📱",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
+
+# --- Скрываем sidebar для мобильной версии ---
+st.markdown("""
+<style>
+    [data-testid="stSidebar"] {
+        display: none;
+    }
+    [data-testid="collapsedControl"] {
+        display: none;
+    }
+    .main > div {
+        padding-top: 1rem;
+    }
+    .stButton > button {
+        width: 100%;
+    }
+    .metric-card {
+        background: white;
+        border-radius: 16px;
+        padding: 12px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        text-align: center;
+    }
+    @media (max-width: 768px) {
+        .metric-card div:first-child {
+            font-size: 24px !important;
+        }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ==================== КОНФИГУРАЦИЯ ====================
+YANDEX_TOKEN = "y0__xCSoI7HARiCoj8gmJWg6RYwg7TKiggf83bV1Q-ufqbt9dsQa23N7Xe2bQ"
+YANDEX_FILE_PATH = "/doc_control/control_system.db"
+
+def check_internet():
+    try:
+        requests.get("https://cloud-api.yandex.net", timeout=5)
+        return True
+    except:
+        return False
+
+def create_folder_if_not_exists():
+    url = "https://cloud-api.yandex.net/v1/disk/resources"
+    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
+    params = {"path": "/doc_control"}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code == 200:
+            return True
+        elif response.status_code == 404:
+            response = requests.put(url, headers=headers, params=params, timeout=10)
+            return response.status_code == 201
+        return False
+    except Exception as e:
+        return False
+
+def download_from_yandex():
+    url = "https://cloud-api.yandex.net/v1/disk/resources/download"
+    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
+    
+    try:
+        params = {"path": YANDEX_FILE_PATH}
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            download_url = response.json()["href"]
+            file_response = requests.get(download_url, timeout=30)
+            if file_response.status_code == 200:
+                with open("control_system.db", "wb") as f:
+                    f.write(file_response.content)
+                return True
+        elif response.status_code == 404:
+            return True
+        return False
+    except Exception as e:
+        return False
+
+def upload_to_yandex():
+    if not os.path.exists("control_system.db"):
+        return False
+    
+    if not create_folder_if_not_exists():
+        return False
+    
+    url = "https://cloud-api.yandex.net/v1/disk/resources/upload"
+    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
+    
+    try:
+        params = {"path": YANDEX_FILE_PATH, "overwrite": "true"}
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            upload_url = response.json()["href"]
+            with open("control_system.db", "rb") as f:
+                file_response = requests.put(upload_url, data=f, timeout=30)
+            return file_response.status_code in [200, 201]
+        return False
+    except Exception as e:
+        return False
+
+def sync_to_cloud():
+    if not check_internet():
+        return False, "Нет интернета"
+    if upload_to_yandex():
+        return True, "Синхронизация выполнена"
+    return False, "Ошибка синхронизации"
+
+def download_from_cloud():
+    if not check_internet():
+        return False, "Нет интернета"
+    if download_from_yandex():
+        return True, "База обновлена"
+    return False, "Ошибка загрузки"
+
+# --- Функции для работы с БД ---
+def normalize_fio(fio):
+    parts = fio.strip().split()
+    normalized_parts = []
+    for part in parts:
+        if part:
+            normalized_parts.append(part[0].upper() + part[1:].lower())
+    return " ".join(normalized_parts)
+
+def transliterate(text):
+    translit_map = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
+        'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
+        'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
+        'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '',
+        'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya'
+    }
+    result = ''
+    for char in text.lower():
+        if char in translit_map:
+            result += translit_map[char]
+        elif char.isalpha():
+            result += char
+    return result
+
+def generate_login(conn, fio):
+    parts = fio.strip().split()
+    if len(parts) < 3:
+        return None
+    surname, name, patronymic = parts[0], parts[1], parts[2]
+    surname_lat = transliterate(surname)
+    name_lat = transliterate(name)
+    patronymic_lat = transliterate(patronymic)
+    name_initial = name_lat[0] if name_lat else ''
+    patronymic_initial = patronymic_lat[0] if patronymic_lat else ''
+    base_login = f"{surname_lat}_{name_initial}{patronymic_initial}"
+    c = conn.cursor()
+    existing = c.execute("SELECT login FROM staff WHERE login LIKE ?", (f"{base_login}%",)).fetchall()
+    if not existing:
+        return base_login
+    numbers = []
+    for login in existing:
+        if login[0] == base_login:
+            numbers.append(0)
+        elif login[0].startswith(base_login):
+            try:
+                num = int(login[0][len(base_login):])
+                numbers.append(num)
+            except:
+                pass
+    max_num = max(numbers) if numbers else 0
+    new_num = max_num + 1
+    return base_login if new_num == 0 else f"{base_login}{new_num}"
+
+def hash_pin(pin):
+    return hashlib.sha256(str(pin).encode()).hexdigest()
+
+def create_admin_if_not_exists(conn):
+    c = conn.cursor()
+    admin = c.execute("SELECT id FROM staff WHERE login = 'admin3452'").fetchone()
+    if not admin:
+        admin_pin_hash = hash_pin("6799")
+        c.execute("INSERT INTO staff (fio, login, department, is_user) VALUES (?, ?, ?, ?)",
+                  ("Администратор", "admin3452", "Администрация", 1))
+        admin_id = c.lastrowid
+        c.execute("INSERT INTO users (user_id, pin_code, created_at) VALUES (?, ?, ?)",
+                  (admin_id, admin_pin_hash, datetime.now().date()))
+        conn.commit()
+
+def init_db():
+    local_db_path = "control_system.db"
+    if os.path.exists(local_db_path):
+        conn = sqlite3.connect(local_db_path, check_same_thread=False)
+        create_admin_if_not_exists(conn)
+        return conn
+    
+    conn = sqlite3.connect(local_db_path, check_same_thread=False)
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS staff (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fio TEXT,
+        login TEXT UNIQUE,
+        department TEXT,
+        is_user INTEGER DEFAULT 0
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        pin_code TEXT,
+        created_at DATE,
+        FOREIGN KEY (user_id) REFERENCES staff(id)
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS departments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS doc_types (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS docs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        doc_type TEXT,
+        doc_number TEXT,
+        reg_date DATE,
+        sender TEXT,
+        summary TEXT,
+        with_who_login TEXT,
+        with_who_fio TEXT,
+        transfer_date DATE,
+        deadline DATE,
+        status TEXT DEFAULT 'В работе',
+        status_history TEXT,
+        comment TEXT,
+        priority INTEGER DEFAULT 0,
+        starred INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+    )''')
+    conn.commit()
+    
+    initial_doc_types = [
+        "КУСП", "Обращение", "Служебная проверка", "Представление",
+        "Указание", "Уголовное дело", "Поручение", "Рапорт",
+        "Докладная записка", "Протокол", "Требование", "Запрос",
+        "Справка", "Информация"
+    ]
+    for dt in initial_doc_types:
+        c.execute("INSERT OR IGNORE INTO doc_types (name) VALUES (?)", (dt,))
+    
+    initial_departments = [
+        "ДЧ УМВД России по Тюменской области", "ИЦ УМВД России по Тюменской области",
+        "КРО УМВД России по Тюменской области", "ОРЧ ГЗ УМВД России по Тюменской области",
+        "ОРЧ СБ УМВД России по Тюменской области", "УДиР УМВД России по Тюменской области",
+        "ОИиОС УМВД России по Тюменской области", "ООД УМВД России по Тюменской области",
+        "ЦФО УМВД России по Тюменской области", "ПО УМВД России по Тюменской области",
+        "СУ УМВД России по Тюменской области", "СЧ СУ УМВД России по Тюменской области",
+        "Тыл УМВД России по Тюменской области", "УГИБДД УМВД России по Тюменской области",
+        "УОООП УМВД России по Тюменской области", "УРЛС УМВД России по Тюменской области",
+        "УУР УМВД России по Тюменской области", "УЭБиПК УМВД России по Тюменской области",
+        "УНК УМВД России по Тюменской области", "УВМ УМВД России по Тюменской области",
+        "УОДУУПиПДН УМВД России по Тюменской области", "ЦКС УМВД России по Тюменской области",
+        "ЦПЭ УМВД России по Тюменской области", "ЦИТСиЗИ УМВД России по Тюменской области",
+        "Штаб УМВД России по Тюменской области", "ЭКЦ УМВД России по Тюменской области",
+        "ОО УМВД России по Тюменской области", "ФКУ \"ЦХ и СО УМВД России по Тюменской области\"",
+        "ОНЦБ Интерпола УМВД России по Тюменской области", "МО ГИБДД РЭР и ТН АМТС УМВД России по Тюменской области",
+        "УМВД России по г.Тюмени", "ДЧ УМВД России по г. Тюмени", "ОДиР УМВД России по г. Тюмени",
+        "ОД УМВД России по г. Тюмени", "ПО УМВД России по г. Тюмени", "СЧ СУ УМВД России по г. Тюмени",
+        "Тыл УМВД России по г. Тюмени", "ОГИБДД УМВД России по г. Тюмени", "ОО УМВД России по г. Тюмени",
+        "ОУР УМВД России по г. Тюмени", "ОЭБиПК УМВД России по г. Тюмени", "ОУУПиПДН УМВД России по г. Тюмени",
+        "ОБ ППСП УМВД России по г. Тюмени", "ОБ ОКПО УМВД России по г. Тюмени", "ОРЛС УМВД России по г. Тюмени",
+        "СУ УМВД России по г.Тюмени", "ОВМ УМВД России по г.Тюмени",
+        "ОП № 1 УМВД России по г.Тюмени", "ОП № 2 УМВД России по г.Тюмени",
+        "ОП № 3 УМВД России по г.Тюмени", "ОП № 4 УМВД России по г.Тюмени",
+        "ОП № 5 УМВД России по г.Тюмени", "ОП № 6 УМВД России по г.Тюмени",
+        "ОП № 7 УМВД России по г.Тюмени", "ОП № 8 УМВД России по г.Тюмени",
+        "МО МВД России «Голышмановский»", "МО МВД России «Заводоуковский»",
+        "МО МВД России «Ишимский»", "МО МВД России «Омутинский»",
+        "МО МВД России «Тобольский»", "МО МВД России «Тюменский»",
+        "МО МВД России «Ялуторовский»", "Отделение МВД России по Казанскому району",
+        "Отдел МВД России по Уватскому району", "МВД России", "ГУСБ МВД России",
+        "ГУРЛС МВД России", "ГУТ МВД России", "ГУУР МВД России",
+        "ГУЭБиПК МВД России", "ГУНК МВД России", "ГУВМ МВД России"
+    ]
+    for dept in initial_departments:
+        c.execute("INSERT OR IGNORE INTO departments (name) VALUES (?)", (dept,))
+    
+    conn.commit()
+    create_admin_if_not_exists(conn)
+    return conn
+
+conn = init_db()
+
+def get_doc_types():
+    types = conn.execute("SELECT name FROM doc_types ORDER BY name").fetchall()
+    return [t[0] for t in types]
+
+def add_doc_type(doc_type_name):
+    if doc_type_name and doc_type_name.strip():
+        try:
+            conn.execute("INSERT OR IGNORE INTO doc_types (name) VALUES (?)", (doc_type_name.strip(),))
+            conn.commit()
+            return True
+        except:
+            return False
+    return False
+
+def register_user(login, fio, department, pin):
+    c = conn.cursor()
+    pin_hash = hash_pin(pin)
+    try:
+        existing = c.execute("SELECT id FROM staff WHERE login = ?", (login,)).fetchone()
+        if existing:
+            return None, "Логин уже существует"
+        c.execute("INSERT INTO staff (fio, login, department, is_user) VALUES (?, ?, ?, 1)", (fio, login, department))
+        staff_id = c.lastrowid
+        c.execute("INSERT INTO users (user_id, pin_code, created_at) VALUES (?, ?, ?)", (staff_id, pin_hash, datetime.now().date()))
+        c.execute("INSERT OR IGNORE INTO departments (name) VALUES (?)", (department,))
+        conn.commit()
+        return staff_id, None
+    except Exception as e:
+        return None, str(e)
+
+def verify_user(login, pin):
+    c = conn.cursor()
+    pin_hash = hash_pin(pin)
+    result = c.execute("""
+        SELECT s.id, s.fio, s.login, s.department 
+        FROM staff s
+        JOIN users u ON s.id = u.user_id
+        WHERE s.login = ? AND u.pin_code = ?
+    """, (login, pin_hash)).fetchone()
+    if result:
+        return result[0], result[1], result[2], result[3]
+    return None, None, None, None
+
+def get_staff_list():
+    staff = conn.execute("""
+        SELECT fio, login, department, is_user 
+        FROM staff 
+        WHERE login != 'admin3452'
+        ORDER BY fio, department
+    """).fetchall()
+    result = []
+    for fio, login, dept, is_user in staff:
+        fio_parts = fio.split()
+        if len(fio_parts) >= 3:
+            display_name = f"{fio_parts[0]} {fio_parts[1][0]}.{fio_parts[2][0]}."
+        elif len(fio_parts) == 2:
+            display_name = f"{fio_parts[0]} {fio_parts[1][0]}."
+        else:
+            display_name = fio
+        display = f"{display_name} ({dept})"
+        result.append({'display': display, 'login': login, 'fio': fio, 'department': dept, 'is_user': is_user})
+    return result
+
+def get_departments():
+    depts = conn.execute("SELECT name FROM departments ORDER BY name").fetchall()
+    return [d[0] for d in depts]
+
+def add_department(dept_name):
+    if dept_name and dept_name.strip():
+        try:
+            conn.execute("INSERT OR IGNORE INTO departments (name) VALUES (?)", (dept_name.strip(),))
+            conn.commit()
+            return True
+        except:
+            return False
+    return False
+
+def get_user_docs(user_id, user_login):
+    return pd.read_sql("""
+        SELECT d.*, s.fio as executor_fio, s.department as executor_dept
+        FROM docs d
+        LEFT JOIN staff s ON d.with_who_login = s.login
+        WHERE d.user_id = ? OR d.with_who_login = ?
+        ORDER BY d.starred DESC, d.deadline ASC, d.reg_date DESC
+    """, conn, params=(user_id, user_login))
+
+def add_document(user_id, doc_type, doc_number, reg_date, sender, summary, 
+                 with_who_login, with_who_fio, deadline, comment, starred):
+    c = conn.cursor()
+    deadline_value = deadline if deadline else None
+    c.execute("""
+        INSERT INTO docs 
+        (user_id, doc_type, doc_number, reg_date, sender, summary, 
+         with_who_login, with_who_fio, transfer_date, deadline, status, status_history, comment, starred)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (user_id, doc_type, doc_number, reg_date, sender, summary,
+          with_who_login, with_who_fio, datetime.now().date(), deadline_value, 
+          "В работе", "", comment, 1 if starred else 0))
+    conn.commit()
+
+def update_document(doc_id, user_id, doc_number, sender, summary, 
+                    with_who_login, with_who_fio, deadline, comment, starred):
+    c = conn.cursor()
+    deadline_value = deadline if deadline else None
+    c.execute("""
+        UPDATE docs SET 
+        doc_number=?, sender=?, summary=?, with_who_login=?, with_who_fio=?,
+        deadline=?, comment=?, starred=?
+        WHERE id=? AND user_id=?
+    """, (doc_number, sender, summary, with_who_login, with_who_fio,
+          deadline_value, comment, 1 if starred else 0, doc_id, user_id))
+    conn.commit()
+
+def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=None, new_with_who_fio=None):
+    c = conn.cursor()
+    doc = c.execute("SELECT status, status_history FROM docs WHERE id=? AND user_id=?", (doc_id, user_id)).fetchone()
+    if not doc:
+        return
+    old_status = doc[0]
+    history = doc[1] if doc[1] else ""
+    now = datetime.now()
+    timestamp = now.strftime('%d.%m.%Y %H:%M:%S')
+    new_entry = f"{timestamp}: {old_status} → {new_status}"
+    if new_status == "Передан" and new_with_who_fio:
+        new_entry += f" (передан {new_with_who_fio})"
+    elif comment:
+        new_entry += f" ({comment})"
+    updated_history = f"{history}\n{new_entry}".strip()
+    if new_with_who_login:
+        c.execute("""
+            UPDATE docs SET 
+            status=?, status_history=?, transfer_date=?, 
+            with_who_login=?, with_who_fio=?
+            WHERE id=? AND user_id=?
+        """, (new_status, updated_history, now.date(), new_with_who_login, new_with_who_fio, doc_id, user_id))
+    else:
+        c.execute("""
+            UPDATE docs SET 
+            status=?, status_history=?, transfer_date=?
+            WHERE id=? AND user_id=?
+        """, (new_status, updated_history, now.date(), doc_id, user_id))
+    conn.commit()
+
+def toggle_star(doc_id, user_id):
+    current = conn.execute("SELECT starred FROM docs WHERE id=? AND user_id=?", (doc_id, user_id)).fetchone()
+    if current:
+        new_value = 1 if current[0] == 0 else 0
+        conn.execute("UPDATE docs SET starred=? WHERE id=? AND user_id=?", (new_value, doc_id, user_id))
+        conn.commit()
+
+# --- Сессия ---
+if 'user_id' not in st.session_state:
+    st.session_state.user_id = None
+if 'user_fio' not in st.session_state:
+    st.session_state.user_fio = None
+if 'user_login' not in st.session_state:
+    st.session_state.user_login = None
+if 'user_dept' not in st.session_state:
+    st.session_state.user_dept = None
+if 'selected_doc_id' not in st.session_state:
+    st.session_state.selected_doc_id = None
+if 'quick_filter' not in st.session_state:
+    st.session_state.quick_filter = 'all'
+
+# ==================== ЭКРАН ВХОДА / РЕГИСТРАЦИИ ====================
+if st.session_state.user_id is None:
+    st.title("📱 DocControl Mobile")
+    
+    mode = st.radio(
+        "Выберите действие",
+        ["🔐 Вход", "📝 Регистрация"],
+        horizontal=True
+    )
+    
+    if mode == "🔐 Вход":
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            login = st.text_input("Логин", placeholder="ivanov_ii")
+            pin = st.text_input("PIN-код", type="password", max_chars=4)
+            if st.button("Войти", type="primary", use_container_width=True):
+                if login and pin and len(pin) == 4 and pin.isdigit():
+                    user_id, fio, user_login, dept = verify_user(login, pin)
+                    if user_id:
+                        st.session_state.user_id = user_id
+                        st.session_state.user_fio = fio
+                        st.session_state.user_login = user_login
+                        st.session_state.user_dept = dept
+                        st.success(f"Добро пожаловать!")
+                        st.rerun()
+                    else:
+                        st.error("Неверный логин или PIN-код")
+                else:
+                    st.error("PIN-код должен быть 4 цифры")
+        with col2:
+            st.info("ℹ️ Логин формируется автоматически из ФИО")
+    
+    else:
+        st.markdown("### Регистрация")
+        col1, col2 = st.columns(2)
+        with col1:
+            last_name = st.text_input("Фамилия")
+            first_name = st.text_input("Имя")
+            patronymic = st.text_input("Отчество")
+        with col2:
+            dept_options = get_departments()
+            department = st.selectbox("Подразделение", [""] + dept_options, format_func=lambda x: "Выберите" if x == "" else x)
+            if department == "":
+                department = st.text_input("Или введите новое")
+            pin = st.text_input("PIN-код (4 цифры)", type="password", max_chars=4)
+            confirm_pin = st.text_input("Подтвердите PIN-код", type="password", max_chars=4)
+        
+        if st.button("Зарегистрироваться", type="primary", use_container_width=True):
+            if last_name and first_name and patronymic and department and pin and pin == confirm_pin and len(pin) == 4 and pin.isdigit():
+                full_fio = f"{last_name} {first_name} {patronymic}"
+                normalized_fio = normalize_fio(full_fio)
+                generated_login = generate_login(conn, normalized_fio)
+                if generated_login:
+                    user_id, error = register_user(generated_login, normalized_fio, department, pin)
+                    if user_id:
+                        st.session_state.user_id = user_id
+                        st.session_state.user_fio = normalized_fio
+                        st.session_state.user_login = generated_login
+                        st.session_state.user_dept = department
+                        st.success(f"Регистрация успешна! Ваш логин: {generated_login}")
+                        st.rerun()
+                    else:
+                        st.error(error)
+                else:
+                    st.error("Ошибка формирования логина")
+            else:
+                st.error("Проверьте правильность заполнения")
+    st.stop()
+
+# ==================== ОСНОВНОЕ ПРИЛОЖЕНИЕ ====================
+is_admin = (st.session_state.user_login == "admin3452")
+
+# Верхняя панель
+col_title, col_sync = st.columns([3, 1])
+with col_title:
+    st.title("📱 DocControl")
+with col_sync:
+    if st.button("🔄", help="Синхронизировать"):
+        success, msg = sync_to_cloud()
+        st.toast(msg, icon="✅" if success else "❌")
+
+st.caption(f"👤 {st.session_state.user_fio} | 🏢 {st.session_state.user_dept}")
+
+# Навигация
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Главная", "📋 Документы", "📅 Календарь", "➕ Добавить"])
+
+# ==================== ГЛАВНАЯ ====================
+with tab1:
+    df_all = get_user_docs(st.session_state.user_id, st.session_state.user_login)
+    if not df_all.empty:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Всего", len(df_all))
+        with col2:
+            active = len(df_all[df_all['status'] != 'Исполнен'])
+            st.metric("В работе", active)
+        with col3:
+            completed = len(df_all[df_all['status'] == 'Исполнен'])
+            st.metric("Исполнено", completed)
+        
+        st.markdown("---")
+        st.subheader("⭐ Закрепленные")
+        starred = df_all[df_all['starred'] == 1].head(3)
+        for _, row in starred.iterrows():
+            st.markdown(f"**{row['doc_type']}** {f'№{row['doc_number']}' if row['doc_number'] else ''}")
+            st.caption(f"📅 {row['reg_date']} | {row['status']}")
+            st.markdown("---")
+    else:
+        st.info("Нет документов")
+
+# ==================== ДОКУМЕНТЫ ====================
+with tab2:
+    st.markdown("### 🔍 Фильтры")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        filter_type = st.selectbox("Вид", ["Все"] + get_doc_types())
+    with col_f2:
+        filter_status = st.selectbox("Статус", ["Все", "В работе", "Передан", "Исполнен"])
+    
+    today = datetime.now().date()
+    df_all = get_user_docs(st.session_state.user_id, st.session_state.user_login)
+    
+    if filter_type != "Все":
+        df_all = df_all[df_all['doc_type'] == filter_type]
+    if filter_status != "Все":
+        df_all = df_all[df_all['status'] == filter_status]
+    
+    if df_all.empty:
+        st.info("Нет документов")
+    else:
+        for _, row in df_all.iterrows():
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{row['doc_type']}** {f'№{row['doc_number']}' if row['doc_number'] else ''}")
+                    st.caption(f"📅 {row['reg_date']}")
+                with col2:
+                    st.markdown(f"**{row['status']}**")
+                
+                if row['deadline']:
+                    deadline = pd.to_datetime(row['deadline']).date()
+                    days_left = (deadline - today).days
+                    if row['status'] != 'Исполнен':
+                        if days_left < 0:
+                            st.warning(f"⚠️ Просрочено на {abs(days_left)} дн.")
+                        elif days_left <= 3:
+                            st.warning(f"🟡 Срок через {days_left} дн.")
+                        else:
+                            st.caption(f"📅 Срок: {deadline}")
+                
+                st.markdown(f"📄 {row['summary'][:100]}...")
+                
+                if row['executor_fio']:
+                    exec_parts = row['executor_fio'].split()
+                    if len(exec_parts) >= 3:
+                        exec_display = f"{exec_parts[0]} {exec_parts[1][0]}.{exec_parts[2][0]}."
+                    else:
+                        exec_display = row['executor_fio']
+                    st.caption(f"👤 {exec_display}")
+                
+                if st.button(f"✏️ Редактировать", key=f"edit_{row['id']}", use_container_width=True):
+                    st.session_state.selected_doc_id = row['id']
+                    st.rerun()
+                
+                if st.session_state.selected_doc_id == row['id']:
+                    with st.form(key=f"edit_form_{row['id']}"):
+                        doc = conn.execute("""
+                            SELECT d.*, s.fio as executor_fio, s.department as executor_dept
+                            FROM docs d
+                            LEFT JOIN staff s ON d.with_who_login = s.login
+                            WHERE d.id = ? AND d.user_id = ?
+                        """, (row['id'], st.session_state.user_id)).fetchone()
+                        
+                        if doc:
+                            new_status = st.selectbox("Статус", ["В работе", "Передан", "Исполнен"], 
+                                                      index=["В работе", "Передан", "Исполнен"].index(doc[11] if doc[11] else "В работе"))
+                            
+                            selected_login = st.session_state.user_login
+                            selected_fio = st.session_state.user_fio
+                            
+                            if new_status == "Передан":
+                                executor_mode = st.radio("Способ", ["Выбрать из списка", "Ввести вручную"], horizontal=True)
+                                if executor_mode == "Выбрать из списка":
+                                    staff_list = get_staff_list()
+                                    if staff_list:
+                                        with_who = st.selectbox("Исполнитель", [s['display'] for s in staff_list])
+                                        selected_login = with_who.split("(")[-1].split(")")[0].strip()
+                                        selected_fio = with_who.split("(")[0].strip()
+                                else:
+                                    selected_fio = st.text_input("ФИО исполнителя")
+                                    selected_login = selected_fio
+                            
+                            doc_number = st.text_input("Номер", value=doc[3] if doc[3] else "")
+                            summary = st.text_area("Содержание", value=doc[6] if doc[6] else "")
+                            deadline = st.date_input("Срок", value=pd.to_datetime(doc[10]).date() if doc[10] else None)
+                            status_comment = st.text_input("Комментарий")
+                            
+                            if st.form_submit_button("💾 Сохранить", use_container_width=True):
+                                if new_status == "Передан" and not selected_fio:
+                                    st.error("Укажите исполнителя")
+                                else:
+                                    update_document(doc[0], st.session_state.user_id, doc_number, doc[5], summary,
+                                                  selected_login, selected_fio, deadline, doc[13], doc[15] == 1)
+                                    if new_status != doc[11]:
+                                        update_status(doc[0], st.session_state.user_id, new_status, status_comment,
+                                                    selected_login if new_status == "Передан" else None,
+                                                    selected_fio if new_status == "Передан" else None)
+                                    st.success("Сохранено!")
+                                    st.session_state.selected_doc_id = None
+                                    st.rerun()
+                
+                if doc[12]:
+                    with st.expander("📜 История"):
+                        for line in doc[12].strip().split('\n'):
+                            st.text(line)
+                
+                st.markdown("---")
+
+# ==================== КАЛЕНДАРЬ ====================
+with tab3:
+    df_all = get_user_docs(st.session_state.user_id, st.session_state.user_login)
+    if not df_all.empty:
+        today = datetime.now().date()
+        selected_month = st.date_input("Месяц", today, format="YYYY/MM/DD")
+        month_start = selected_month.replace(day=1)
+        if selected_month.month == 12:
+            month_end = selected_month.replace(year=selected_month.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            month_end = selected_month.replace(month=selected_month.month + 1, day=1) - timedelta(days=1)
+        
+        deadlines = {}
+        for _, row in df_all.iterrows():
+            if row['deadline']:
+                date_obj = pd.to_datetime(row['deadline']).date()
+                if month_start <= date_obj <= month_end:
+                    if date_obj not in deadlines:
+                        deadlines[date_obj] = []
+                    deadlines[date_obj].append({'doc': row, 'status': row['status']})
+        
+        start_weekday = month_start.weekday()
+        days_in_month = (month_end - month_start).days + 1
+        
+        cols = st.columns(7)
+        weekdays = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+        for i, col in enumerate(cols):
+            col.markdown(f"<div style='text-align: center; font-weight: bold;'>{weekdays[i]}</div>", unsafe_allow_html=True)
+        
+        current_day = 1
+        for week in range(6):
+            cols = st.columns(7)
+            for day_idx in range(7):
+                if week == 0 and day_idx < start_weekday:
+                    cols[day_idx].empty()
+                elif current_day > days_in_month:
+                    cols[day_idx].empty()
+                else:
+                    current_date = month_start + timedelta(days=current_day - 1)
+                    date_obj = current_date
+                    
+                    if date_obj in deadlines:
+                        has_overdue = any(d['status'] != 'Исполнен' and date_obj < today for d in deadlines[date_obj])
+                        has_upcoming = any(d['status'] != 'Исполнен' and (date_obj - today).days <= 7 for d in deadlines[date_obj])
+                        if has_overdue:
+                            color = "🔴"
+                        elif has_upcoming:
+                            color = "🟡"
+                        else:
+                            color = "🟢"
+                    else:
+                        color = "⚪"
+                    
+                    if date_obj == today:
+                        color = "🔵"
+                    
+                    with cols[day_idx]:
+                        st.markdown(f"<div style='text-align: center; padding: 8px; background: #f0f2f6; border-radius: 8px;'>{color}<br><strong>{current_day}</strong></div>", unsafe_allow_html=True)
+                    
+                    current_day += 1
+    else:
+        st.info("Нет документов")
+
+# ==================== ДОБАВИТЬ ДОКУМЕНТ ====================
+with tab4:
+    with st.form("add_doc", clear_on_submit=True):
+        doc_type = st.selectbox("Вид документа", get_doc_types())
+        doc_number = st.text_input("Номер (необязательно)")
+        
+        dept_options = get_departments()
+        sender = st.selectbox("От кого поступил", [""] + dept_options, format_func=lambda x: "Выберите" if x == "" else x)
+        if sender == "":
+            sender = st.text_input("Или введите новое")
+        
+        reg_date = st.date_input("Дата поступления", datetime.now().date())
+        deadline = st.date_input("Срок исполнения (необязательно)", value=None)
+        
+        st.markdown("**У кого находится**")
+        st.info("По умолчанию — вы")
+        selected_login = st.session_state.user_login
+        selected_fio = st.session_state.user_fio
+        
+        summary = st.text_area("Содержание", height=100)
+        comment = st.text_area("Примечание")
+        starred = st.checkbox("⭐ Закрепить")
+        
+        if st.form_submit_button("➕ Добавить", use_container_width=True, type="primary"):
+            if summary:
+                if sender and sender not in dept_options:
+                    add_department(sender)
+                add_document(
+                    st.session_state.user_id, doc_type, doc_number, reg_date, sender, summary,
+                    selected_login, selected_fio, deadline, comment, starred
+                )
+                st.success("✅ Документ добавлен!")
+                st.toast("Документ добавлен!", icon="✅")
+                st.rerun()
+            else:
+                st.error("Введите содержание")
