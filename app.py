@@ -29,7 +29,7 @@ st.markdown("""
         display: none;
     }
     .main > div {
-        padding-top: 1rem;
+        padding-top: 0.5rem;
     }
     .stButton > button {
         width: 100%;
@@ -39,6 +39,13 @@ st.markdown("""
         border-radius: 16px;
         padding: 12px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        text-align: center;
+    }
+    .user-info {
+        background: #f0f2f6;
+        border-radius: 12px;
+        padding: 10px;
+        margin-bottom: 10px;
         text-align: center;
     }
     @media (max-width: 768px) {
@@ -64,7 +71,6 @@ def create_folder_if_not_exists():
     url = "https://cloud-api.yandex.net/v1/disk/resources"
     headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
     params = {"path": "/doc_control"}
-    
     try:
         response = requests.get(url, headers=headers, params=params, timeout=10)
         if response.status_code == 200:
@@ -79,11 +85,9 @@ def create_folder_if_not_exists():
 def download_from_yandex():
     url = "https://cloud-api.yandex.net/v1/disk/resources/download"
     headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
-    
     try:
         params = {"path": YANDEX_FILE_PATH}
         response = requests.get(url, headers=headers, params=params, timeout=10)
-        
         if response.status_code == 200:
             download_url = response.json()["href"]
             file_response = requests.get(download_url, timeout=30)
@@ -100,17 +104,13 @@ def download_from_yandex():
 def upload_to_yandex():
     if not os.path.exists("control_system.db"):
         return False
-    
     if not create_folder_if_not_exists():
         return False
-    
     url = "https://cloud-api.yandex.net/v1/disk/resources/upload"
     headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
-    
     try:
         params = {"path": YANDEX_FILE_PATH, "overwrite": "true"}
         response = requests.get(url, headers=headers, params=params, timeout=10)
-        
         if response.status_code == 200:
             upload_url = response.json()["href"]
             with open("control_system.db", "rb") as f:
@@ -475,10 +475,20 @@ if 'selected_doc_id' not in st.session_state:
     st.session_state.selected_doc_id = None
 if 'quick_filter' not in st.session_state:
     st.session_state.quick_filter = 'all'
+if 'show_login_message' not in st.session_state:
+    st.session_state.show_login_message = False
+if 'temp_login' not in st.session_state:
+    st.session_state.temp_login = None
 
 # ==================== ЭКРАН ВХОДА / РЕГИСТРАЦИИ ====================
 if st.session_state.user_id is None:
     st.title("📱 DocControl Mobile")
+    
+    # Показываем сообщение с логином, если было
+    if st.session_state.show_login_message and st.session_state.temp_login:
+        st.success(f"✅ Регистрация успешна! Ваш логин: **{st.session_state.temp_login}**")
+        st.info("Сохраните этот логин для входа!")
+        st.session_state.show_login_message = False
     
     mode = st.radio(
         "Выберите действие",
@@ -531,11 +541,12 @@ if st.session_state.user_id is None:
                 if generated_login:
                     user_id, error = register_user(generated_login, normalized_fio, department, pin)
                     if user_id:
+                        st.session_state.temp_login = generated_login
+                        st.session_state.show_login_message = True
                         st.session_state.user_id = user_id
                         st.session_state.user_fio = normalized_fio
                         st.session_state.user_login = generated_login
                         st.session_state.user_dept = department
-                        st.success(f"Регистрация успешна! Ваш логин: {generated_login}")
                         st.rerun()
                     else:
                         st.error(error)
@@ -548,19 +559,52 @@ if st.session_state.user_id is None:
 # ==================== ОСНОВНОЕ ПРИЛОЖЕНИЕ ====================
 is_admin = (st.session_state.user_login == "admin3452")
 
-# Верхняя панель
-col_title, col_sync = st.columns([3, 1])
-with col_title:
-    st.title("📱 DocControl")
-with col_sync:
-    if st.button("🔄", help="Синхронизировать"):
-        success, msg = sync_to_cloud()
-        st.toast(msg, icon="✅" if success else "❌")
+# Верхняя панель с информацией о пользователе и кнопкой выхода
+col1, col2, col3 = st.columns([3, 2, 1])
+with col1:
+    # Отображаем ФИО в формате "Фамилия И.О."
+    fio_parts = st.session_state.user_fio.split()
+    if len(fio_parts) >= 3:
+        display_name = f"{fio_parts[0]} {fio_parts[1][0]}.{fio_parts[2][0]}."
+    elif len(fio_parts) == 2:
+        display_name = f"{fio_parts[0]} {fio_parts[1][0]}."
+    else:
+        display_name = st.session_state.user_fio
+    
+    st.markdown(f"""
+    <div class="user-info">
+        👤 {display_name}<br>
+        🏢 {st.session_state.user_dept}<br>
+        🔑 Логин: <strong>{st.session_state.user_login}</strong>
+    </div>
+    """, unsafe_allow_html=True)
+with col3:
+    if st.button("🚪 Выход", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
 
-st.caption(f"👤 {st.session_state.user_fio} | 🏢 {st.session_state.user_dept}")
+# Кнопка синхронизации (только для админа)
+if is_admin:
+    col_sync1, col_sync2 = st.columns(2)
+    with col_sync1:
+        if st.button("🔄 Синхронизировать", use_container_width=True, help="Сохранить данные в облако"):
+            success, msg = sync_to_cloud()
+            st.toast(msg, icon="✅" if success else "❌")
+    with col_sync2:
+        if st.button("⬇️ Загрузить с диска", use_container_width=True, help="Обновить данные из облака"):
+            success, msg = download_from_cloud()
+            if success:
+                st.toast(msg, icon="✅")
+                st.rerun()
+            else:
+                st.toast(msg, icon="❌")
 
-# Навигация
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Главная", "📋 Документы", "📅 Календарь", "➕ Добавить"])
+# Навигация для администратора и обычного пользователя
+if is_admin:
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Главная", "📋 Документы", "📅 Календарь", "➕ Добавить", "⚙️ Управление"])
+else:
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Главная", "📋 Документы", "📅 Календарь", "➕ Добавить"])
 
 # ==================== ГЛАВНАЯ ====================
 with tab1:
@@ -636,6 +680,12 @@ with tab2:
                         exec_display = row['executor_fio']
                     st.caption(f"👤 {exec_display}")
                 
+                # История изменений
+                if row['status_history'] and row['status_history'].strip():
+                    with st.expander("📜 История изменений", expanded=False):
+                        for line in row['status_history'].strip().split('\n'):
+                            st.text(line)
+                
                 if st.button(f"✏️ Редактировать", key=f"edit_{row['id']}", use_container_width=True):
                     st.session_state.selected_doc_id = row['id']
                     st.rerun()
@@ -650,47 +700,120 @@ with tab2:
                         """, (row['id'], st.session_state.user_id)).fetchone()
                         
                         if doc:
-                            new_status = st.selectbox("Статус", ["В работе", "Передан", "Исполнен"], 
-                                                      index=["В работе", "Передан", "Исполнен"].index(doc[11] if doc[11] else "В работе"))
+                            # Статус
+                            status_options = ["В работе", "Передан", "Исполнен"]
+                            current_status = doc[11] if doc[11] else "В работе"
+                            status_index = status_options.index(current_status) if current_status in status_options else 0
+                            new_status = st.selectbox("Статус", status_options, index=status_index)
                             
+                            # Логика выбора исполнителя
                             selected_login = st.session_state.user_login
                             selected_fio = st.session_state.user_fio
                             
                             if new_status == "Передан":
-                                executor_mode = st.radio("Способ", ["Выбрать из списка", "Ввести вручную"], horizontal=True)
+                                st.warning("⚠️ Выберите исполнителя для передачи документа")
+                                executor_mode = st.radio("Способ указания", ["Выбрать из списка", "Ввести вручную"], horizontal=True)
                                 if executor_mode == "Выбрать из списка":
                                     staff_list = get_staff_list()
                                     if staff_list:
-                                        with_who = st.selectbox("Исполнитель", [s['display'] for s in staff_list])
+                                        staff_displays = [s['display'] for s in staff_list]
+                                        current_with_who_login = doc[8] if doc[8] else st.session_state.user_login
+                                        default_display = None
+                                        for s in staff_list:
+                                            if s['login'] == current_with_who_login:
+                                                default_display = s['display']
+                                                break
+                                        default_index = 0
+                                        if default_display and default_display in staff_displays:
+                                            default_index = staff_displays.index(default_display)
+                                        with_who = st.selectbox("Выберите исполнителя", staff_displays, index=default_index)
                                         selected_login = with_who.split("(")[-1].split(")")[0].strip()
                                         selected_fio = with_who.split("(")[0].strip()
+                                    else:
+                                        st.error("Нет зарегистрированных сотрудников")
                                 else:
-                                    selected_fio = st.text_input("ФИО исполнителя")
+                                    selected_fio = st.text_input("Введите фамилию и инициалы", value=doc[9] if doc[9] else "")
                                     selected_login = selected_fio
-                            
-                            doc_number = st.text_input("Номер", value=doc[3] if doc[3] else "")
-                            summary = st.text_area("Содержание", value=doc[6] if doc[6] else "")
-                            deadline = st.date_input("Срок", value=pd.to_datetime(doc[10]).date() if doc[10] else None)
-                            status_comment = st.text_input("Комментарий")
-                            
-                            if st.form_submit_button("💾 Сохранить", use_container_width=True):
-                                if new_status == "Передан" and not selected_fio:
-                                    st.error("Укажите исполнителя")
+                            elif new_status == "В работе":
+                                selected_login = st.session_state.user_login
+                                selected_fio = st.session_state.user_fio
+                                st.info(f"Исполнитель: {display_name}")
+                            elif new_status == "Исполнен":
+                                change_executor = st.checkbox("Изменить исполнителя")
+                                if change_executor:
+                                    executor_mode = st.radio("Способ указания", ["Выбрать из списка", "Ввести вручную"], horizontal=True)
+                                    if executor_mode == "Выбрать из списка":
+                                        staff_list = get_staff_list()
+                                        if staff_list:
+                                            staff_displays = [s['display'] for s in staff_list]
+                                            current_with_who_login = doc[8] if doc[8] else st.session_state.user_login
+                                            default_display = None
+                                            for s in staff_list:
+                                                if s['login'] == current_with_who_login:
+                                                    default_display = s['display']
+                                                    break
+                                            default_index = 0
+                                            if default_display and default_display in staff_displays:
+                                                default_index = staff_displays.index(default_display)
+                                            with_who = st.selectbox("Выберите исполнителя", staff_displays, index=default_index)
+                                            selected_login = with_who.split("(")[-1].split(")")[0].strip()
+                                            selected_fio = with_who.split("(")[0].strip()
+                                        else:
+                                            selected_login = doc[8] if doc[8] else st.session_state.user_login
+                                            selected_fio = doc[9] if doc[9] else st.session_state.user_fio
+                                    else:
+                                        selected_fio = st.text_input("Введите фамилию и инициалы", value=doc[9] if doc[9] else "")
+                                        selected_login = selected_fio
                                 else:
-                                    update_document(doc[0], st.session_state.user_id, doc_number, doc[5], summary,
-                                                  selected_login, selected_fio, deadline, doc[13], doc[15] == 1)
-                                    if new_status != doc[11]:
-                                        update_status(doc[0], st.session_state.user_id, new_status, status_comment,
-                                                    selected_login if new_status == "Передан" else None,
-                                                    selected_fio if new_status == "Передан" else None)
-                                    st.success("Сохранено!")
+                                    selected_login = doc[8] if doc[8] else st.session_state.user_login
+                                    selected_fio = doc[9] if doc[9] else st.session_state.user_fio
+                            
+                            # Основные поля
+                            doc_number = st.text_input("Номер документа", value=doc[3] if doc[3] else "")
+                            
+                            dept_options = get_departments()
+                            current_sender = doc[5] if doc[5] else ""
+                            if current_sender in dept_options:
+                                sender_index = dept_options.index(current_sender) + 1
+                            else:
+                                sender_index = 0
+                            sender_select = st.selectbox("От кого поступил", options=[""] + dept_options, index=sender_index)
+                            sender_new = st.text_input("Или введите новое", value=current_sender if current_sender not in dept_options else "")
+                            sender = sender_new if sender_new else sender_select
+                            
+                            summary = st.text_area("Содержание", value=doc[6] if doc[6] else "", height=100)
+                            
+                            current_deadline = pd.to_datetime(doc[10]).date() if doc[10] else None
+                            deadline = st.date_input("Срок исполнения (необязательно)", value=current_deadline if current_deadline else None)
+                            
+                            status_comment = st.text_input("Комментарий к изменению статуса")
+                            comment = st.text_area("Примечание", value=doc[13] if doc[13] else "")
+                            starred = st.checkbox("⭐ Закрепить документ", value=doc[15] == 1)
+                            
+                            col_btn1, col_btn2 = st.columns(2)
+                            with col_btn1:
+                                if st.form_submit_button("💾 Сохранить", use_container_width=True):
+                                    if new_status == "Передан" and not selected_fio:
+                                        st.error("Для передачи документа необходимо указать исполнителя")
+                                    else:
+                                        if sender_new and sender_new not in dept_options:
+                                            add_department(sender_new)
+                                        
+                                        update_document(doc[0], st.session_state.user_id, doc_number, sender, summary,
+                                                      selected_login, selected_fio, deadline, comment, starred)
+                                        
+                                        if new_status != current_status:
+                                            update_status(doc[0], st.session_state.user_id, new_status, status_comment,
+                                                        selected_login if new_status == "Передан" else None,
+                                                        selected_fio if new_status == "Передан" else None)
+                                        
+                                        st.success("Сохранено!")
+                                        st.session_state.selected_doc_id = None
+                                        st.rerun()
+                            with col_btn2:
+                                if st.form_submit_button("❌ Отменить", use_container_width=True):
                                     st.session_state.selected_doc_id = None
                                     st.rerun()
-                
-                if doc[12]:
-                    with st.expander("📜 История"):
-                        for line in doc[12].strip().split('\n'):
-                            st.text(line)
                 
                 st.markdown("---")
 
@@ -793,3 +916,197 @@ with tab4:
                 st.rerun()
             else:
                 st.error("Введите содержание")
+
+# ==================== УПРАВЛЕНИЕ (только для администратора) ====================
+if is_admin and 'tab5' in locals():
+    with tab5:
+        st.title("⚙️ Управление")
+        
+        tab_a, tab_b, tab_c, tab_d = st.tabs(["👥 Сотрудники", "🏢 Подразделения", "📄 Виды документов", "👤 Пользователи"])
+        
+        with tab_a:
+            st.subheader("Список сотрудников")
+            df_staff = pd.read_sql("""
+                SELECT id, fio, login, department, 
+                       CASE WHEN is_user = 1 THEN 'Да' ELSE 'Нет' END as registered
+                FROM staff 
+                WHERE login != 'admin3452'
+                ORDER BY fio
+            """, conn)
+            if not df_staff.empty:
+                display_data = []
+                for _, row in df_staff.iterrows():
+                    parts = row['fio'].split()
+                    if len(parts) >= 3:
+                        display_fio = f"{parts[0]} {parts[1][0]}.{parts[2][0]}."
+                    else:
+                        display_fio = row['fio']
+                    display_data.append({
+                        'id': row['id'],
+                        'ФИО': display_fio,
+                        'Логин': row['login'],
+                        'Подразделение': row['department'],
+                        'Зарегистрирован': row['registered']
+                    })
+                st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
+                
+                del_id = st.number_input("ID для удаления", min_value=1, step=1)
+                if st.button("🗑️ Удалить сотрудника"):
+                    used = conn.execute("SELECT COUNT(*) FROM docs WHERE with_who_login = (SELECT login FROM staff WHERE id=?)", (del_id,)).fetchone()[0]
+                    if used > 0:
+                        st.error(f"Нельзя удалить — сотрудник указан в {used} документе(ах)")
+                    else:
+                        conn.execute("DELETE FROM staff WHERE id=?", (del_id,))
+                        conn.commit()
+                        st.success("Удалено")
+                        st.rerun()
+            else:
+                st.info("Сотрудников пока нет")
+            
+            st.markdown("---")
+            st.subheader("➕ Добавить сотрудника")
+            new_fio = st.text_input("ФИО (полностью)")
+            new_login = st.text_input("Логин")
+            new_dept = st.text_input("Подразделение")
+            if st.button("Добавить сотрудника", use_container_width=True):
+                if new_fio and new_login and new_dept:
+                    try:
+                        conn.execute("INSERT INTO staff (fio, login, department, is_user) VALUES (?, ?, ?, 0)", (new_fio, new_login, new_dept))
+                        conn.commit()
+                        add_department(new_dept)
+                        st.success(f"Добавлен: {new_fio}")
+                        st.rerun()
+                    except:
+                        st.error("Ошибка: логин уже существует")
+                else:
+                    st.error("Заполните все поля")
+        
+        with tab_b:
+            st.subheader("Список подразделений")
+            df_depts = pd.read_sql("SELECT id, name FROM departments ORDER BY name", conn)
+            if not df_depts.empty:
+                st.dataframe(df_depts, use_container_width=True, hide_index=True)
+                del_id = st.number_input("ID для удаления", min_value=1, step=1, key="del_dept")
+                if st.button("🗑️ Удалить подразделение"):
+                    conn.execute("DELETE FROM departments WHERE id=?", (del_id,))
+                    conn.commit()
+                    st.success("Удалено")
+                    st.rerun()
+            else:
+                st.info("Подразделений пока нет")
+            
+            st.markdown("---")
+            st.subheader("➕ Добавить подразделение")
+            new_dept = st.text_input("Новое подразделение")
+            if st.button("Добавить подразделение", use_container_width=True):
+                if new_dept:
+                    add_department(new_dept)
+                    st.success(f"Добавлено: {new_dept}")
+                    st.rerun()
+        
+        with tab_c:
+            st.subheader("Список видов документов")
+            df_doc_types = pd.read_sql("SELECT id, name FROM doc_types ORDER BY name", conn)
+            if not df_doc_types.empty:
+                st.dataframe(df_doc_types, use_container_width=True, hide_index=True)
+                del_id = st.number_input("ID для удаления", min_value=1, step=1, key="del_doc_type")
+                if st.button("🗑️ Удалить вид документа"):
+                    doc_name = df_doc_types[df_doc_types['id'] == del_id]['name'].values
+                    if len(doc_name) > 0:
+                        used = conn.execute("SELECT COUNT(*) FROM docs WHERE doc_type = ?", (doc_name[0],)).fetchone()[0]
+                        if used > 0:
+                            st.error(f"Нельзя удалить — вид используется в {used} документе(ах)")
+                        else:
+                            conn.execute("DELETE FROM doc_types WHERE id=?", (del_id,))
+                            conn.commit()
+                            st.success("Удалено")
+                            st.rerun()
+            else:
+                st.info("Видов документов пока нет")
+            
+            st.markdown("---")
+            st.subheader("➕ Добавить вид документа")
+            new_doc_type = st.text_input("Новый вид документа")
+            if st.button("Добавить вид документа", use_container_width=True):
+                if new_doc_type:
+                    if add_doc_type(new_doc_type):
+                        st.success(f"Добавлено: {new_doc_type}")
+                        st.rerun()
+                    else:
+                        st.error("Ошибка: такой вид уже существует")
+        
+        with tab_d:
+            st.subheader("Список зарегистрированных пользователей")
+            df_users = pd.read_sql("""
+                SELECT s.id, s.fio, s.login, s.department, u.created_at
+                FROM staff s
+                JOIN users u ON s.id = u.user_id
+                WHERE s.login != 'admin3452'
+                ORDER BY s.fio
+            """, conn)
+            if not df_users.empty:
+                display_data = []
+                for _, row in df_users.iterrows():
+                    parts = row['fio'].split()
+                    if len(parts) >= 3:
+                        display_fio = f"{parts[0]} {parts[1][0]}.{parts[2][0]}."
+                    else:
+                        display_fio = row['fio']
+                    display_data.append({
+                        'id': row['id'],
+                        'ФИО': display_fio,
+                        'Логин': row['login'],
+                        'Подразделение': row['department'],
+                        'Дата регистрации': row['created_at']
+                    })
+                st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
+                
+                del_user_id = st.number_input("ID пользователя для удаления", min_value=1, step=1)
+                if st.button("🗑️ Удалить пользователя", type="secondary"):
+                    if del_user_id == st.session_state.user_id:
+                        st.error("Нельзя удалить самого себя")
+                    else:
+                        conn.execute("DELETE FROM docs WHERE user_id = ?", (del_user_id,))
+                        conn.execute("DELETE FROM users WHERE user_id = ?", (del_user_id,))
+                        conn.execute("UPDATE staff SET is_user = 0 WHERE id = ?", (del_user_id,))
+                        conn.commit()
+                        st.success("Пользователь удален")
+                        st.rerun()
+            else:
+                st.info("Пользователей пока нет")
+            
+            st.markdown("---")
+            st.subheader("✏️ Редактирование пользователя")
+            user_options = {f"{row['fio']} ({row['login']})": row['id'] for _, row in df_users.iterrows()}
+            if user_options:
+                selected_user_display = st.selectbox("Выберите пользователя", list(user_options.keys()))
+                selected_user_id = user_options[selected_user_display]
+                user_data = df_users[df_users['id'] == selected_user_id].iloc[0]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_pin = st.text_input("Новый PIN-код", type="password", max_chars=4)
+                    confirm_pin = st.text_input("Подтвердите PIN-код", type="password", max_chars=4)
+                    if st.button("Изменить PIN-код", use_container_width=True):
+                        if new_pin and confirm_pin and new_pin == confirm_pin and len(new_pin) == 4 and new_pin.isdigit():
+                            new_pin_hash = hash_pin(new_pin)
+                            conn.execute("UPDATE users SET pin_code = ? WHERE user_id = ?", (new_pin_hash, selected_user_id))
+                            conn.commit()
+                            st.success("PIN-код изменен!")
+                            st.rerun()
+                        else:
+                            st.error("PIN-код должен быть 4 цифры и совпадать")
+                
+                with col2:
+                    dept_options = get_departments()
+                    current_dept = user_data['department']
+                    new_dept = st.selectbox("Новое подразделение", dept_options, index=dept_options.index(current_dept) if current_dept in dept_options else 0)
+                    if st.button("Изменить подразделение", use_container_width=True):
+                        if new_dept != current_dept:
+                            conn.execute("UPDATE staff SET department = ? WHERE id = ?", (new_dept, selected_user_id))
+                            conn.commit()
+                            add_department(new_dept)
+                            st.success("Подразделение изменено!")
+                            st.rerun()
+            else:
+                st.info("Нет пользователей для редактирования")
