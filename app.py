@@ -10,6 +10,25 @@ from io import BytesIO
 import hashlib
 import tempfile
 import re
+import sys
+
+# === ОТЛАДКА ===
+class StreamToLogger:
+    def __init__(self):
+        self.logs = []
+    def write(self, message):
+        if message.strip():
+            self.logs.append(message.strip())
+    def flush(self):
+        pass
+
+logger = StreamToLogger()
+sys.stderr = logger
+sys.stdout = logger
+
+def debug_print(*args):
+    message = " ".join(str(a) for a in args)
+    logger.write(message)
 
 # --- Настройка страницы (мобильная) ---
 st.set_page_config(
@@ -19,9 +38,66 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- Скрываем sidebar для мобильной версии ---
+# --- CSS ---
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    * {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    .stButton > button {
+        border-radius: 10px;
+        font-weight: 500;
+        transition: all 0.2s;
+    }
+    
+    .metric-card {
+        background: var(--background-color);
+        border-radius: 16px;
+        padding: 12px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        border: 1px solid var(--border-color);
+        text-align: center;
+    }
+    
+    .metric-card div:first-child {
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--text-color);
+    }
+    
+    .metric-card div:last-child {
+        font-size: 14px;
+        color: var(--text-color-secondary);
+    }
+    
+    .user-info {
+        background: var(--background-color);
+        border-radius: 12px;
+        padding: 12px;
+        margin-bottom: 12px;
+        text-align: center;
+        border: 1px solid var(--border-color);
+        font-size: 14px;
+        line-height: 1.5;
+    }
+    
+    .user-info strong {
+        color: var(--primary-color);
+    }
+    
+    @media (max-width: 768px) {
+        .metric-card div:first-child {
+            font-size: 24px !important;
+        }
+        .stButton > button {
+            font-size: 14px;
+            padding: 8px 12px;
+        }
+    }
+    
     [data-testid="stSidebar"] {
         display: none;
     }
@@ -33,59 +109,6 @@ st.markdown("""
     }
     .stButton > button {
         width: 100%;
-    }
-    .metric-card {
-        background: white;
-        border-radius: 16px;
-        padding: 12px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        border: 1px solid rgba(0,0,0,0.05);
-        text-align: center;
-    }
-    .user-info {
-        background: #f0f2f6;
-        border-radius: 12px;
-        padding: 10px;
-        margin-bottom: 10px;
-        text-align: center;
-        border: 1px solid #e0e0e0;
-    }
-    @media (max-width: 768px) {
-        .metric-card div:first-child {
-            font-size: 24px !important;
-        }
-    }
-    /* Адаптация для темной темы */
-    @media (prefers-color-scheme: dark) {
-        .metric-card {
-            background: #2D2D3A;
-            border-color: #4A4A5A;
-            color: #E0E0E0;
-        }
-        .user-info {
-            background: #2D2D3A;
-            border-color: #4A4A5A;
-            color: #E0E0E0;
-        }
-        .stTextInput input, .stSelectbox select, .stTextArea textarea {
-            background-color: #2D2D3A;
-            color: #E0E0E0;
-            border-color: #4A4A5A;
-        }
-        .stAlert {
-            background-color: #2D2D3A;
-            color: #E0E0E0;
-        }
-        div[data-testid="stExpander"] details summary {
-            color: #E0E0E0;
-        }
-        div[data-testid="stExpander"] details {
-            background-color: #2D2D3A;
-            border-color: #4A4A5A;
-        }
-        hr {
-            border-color: #4A4A5A;
-        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -424,13 +447,18 @@ def add_department(dept_name):
     return False
 
 def get_user_docs(user_id, user_login):
-    return pd.read_sql("""
+    """Получает документы, где пользователь является владельцем ИЛИ исполнителем"""
+    query = """
         SELECT d.*, s.fio as executor_fio, s.department as executor_dept
         FROM docs d
         LEFT JOIN staff s ON d.with_who_login = s.login
         WHERE d.user_id = ? OR d.with_who_login = ?
         ORDER BY d.starred DESC, d.deadline ASC, d.reg_date DESC
-    """, conn, params=(user_id, user_login))
+    """
+    debug_print(f"[DEBUG] get_user_docs: user_id={user_id}, user_login={user_login}")
+    result = pd.read_sql(query, conn, params=(user_id, user_login))
+    debug_print(f"[DEBUG] Найдено документов: {len(result)}")
+    return result
 
 def add_document(user_id, doc_type, doc_number, reg_date, sender, summary, 
                  with_who_login, with_who_fio, deadline, comment, starred):
@@ -445,6 +473,7 @@ def add_document(user_id, doc_type, doc_number, reg_date, sender, summary,
           with_who_login, with_who_fio, datetime.now().date(), deadline_value, 
           "В работе", "", comment, 1 if starred else 0))
     conn.commit()
+    debug_print(f"[DEBUG] Добавлен документ: user_id={user_id}, with_who_login={with_who_login}, with_who_fio={with_who_fio}")
 
 def update_document(doc_id, user_id, doc_number, sender, summary, 
                     with_who_login, with_who_fio, deadline, comment, starred):
@@ -458,6 +487,7 @@ def update_document(doc_id, user_id, doc_number, sender, summary,
     """, (doc_number, sender, summary, with_who_login, with_who_fio,
           deadline_value, comment, 1 if starred else 0, doc_id, user_id))
     conn.commit()
+    debug_print(f"[DEBUG] Обновлен документ {doc_id}: with_who_login={with_who_login}, with_who_fio={with_who_fio}")
 
 def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=None, new_with_who_fio=None):
     c = conn.cursor()
@@ -471,9 +501,11 @@ def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=No
     new_entry = f"{timestamp}: {old_status} → {new_status}"
     if new_status == "Передан" and new_with_who_fio:
         new_entry += f" (передан {new_with_who_fio})"
+        debug_print(f"[DEBUG] Передача документа {doc_id}: новому исполнителю {new_with_who_fio} (логин: {new_with_who_login})")
     elif comment:
         new_entry += f" ({comment})"
     updated_history = f"{history}\n{new_entry}".strip()
+    
     if new_with_who_login:
         c.execute("""
             UPDATE docs SET 
@@ -481,6 +513,7 @@ def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=No
             with_who_login=?, with_who_fio=?
             WHERE id=? AND user_id=?
         """, (new_status, updated_history, now.date(), new_with_who_login, new_with_who_fio, doc_id, user_id))
+        debug_print(f"[DEBUG] Обновлен статус документа {doc_id}: новый статус={new_status}, исполнитель={new_with_who_fio}")
     else:
         c.execute("""
             UPDATE docs SET 
@@ -513,6 +546,8 @@ if 'show_login_message' not in st.session_state:
     st.session_state.show_login_message = False
 if 'temp_login' not in st.session_state:
     st.session_state.temp_login = None
+if 'show_debug' not in st.session_state:
+    st.session_state.show_debug = False
 
 # ==================== ЭКРАН ВХОДА / РЕГИСТРАЦИИ ====================
 if st.session_state.user_id is None:
@@ -616,6 +651,21 @@ with col3:
             del st.session_state[key]
         st.rerun()
 
+# Кнопка просмотра логов (только для администратора)
+if is_admin:
+    col_debug1, col_debug2 = st.columns([4, 1])
+    with col_debug2:
+        if st.button("🐛 Логи", help="Показать отладочные сообщения"):
+            st.session_state.show_debug = not st.session_state.get('show_debug', False)
+    
+    if st.session_state.get('show_debug', False):
+        with st.expander("📋 Отладочные сообщения", expanded=True):
+            if logger.logs:
+                for log in logger.logs[-50:]:
+                    st.code(log, language="text")
+            else:
+                st.info("Нет сообщений")
+
 # Кнопка синхронизации (только для админа)
 if is_admin:
     col_sync1, col_sync2 = st.columns(2)
@@ -711,6 +761,8 @@ with tab2:
                     else:
                         exec_display = row['executor_fio']
                     st.caption(f"👤 {exec_display}")
+                else:
+                    st.caption(f"👤 {row['with_who_fio'] if row['with_who_fio'] else 'Не указан'}")
                 
                 # История изменений
                 if row['status_history'] and row['status_history'].strip():
