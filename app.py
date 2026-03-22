@@ -39,6 +39,7 @@ st.markdown("""
         border-radius: 16px;
         padding: 12px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        border: 1px solid rgba(0,0,0,0.05);
         text-align: center;
     }
     .user-info {
@@ -47,10 +48,43 @@ st.markdown("""
         padding: 10px;
         margin-bottom: 10px;
         text-align: center;
+        border: 1px solid #e0e0e0;
     }
     @media (max-width: 768px) {
         .metric-card div:first-child {
             font-size: 24px !important;
+        }
+    }
+    /* Адаптация для темной темы */
+    @media (prefers-color-scheme: dark) {
+        .metric-card {
+            background: #2D2D3A;
+            border-color: #4A4A5A;
+            color: #E0E0E0;
+        }
+        .user-info {
+            background: #2D2D3A;
+            border-color: #4A4A5A;
+            color: #E0E0E0;
+        }
+        .stTextInput input, .stSelectbox select, .stTextArea textarea {
+            background-color: #2D2D3A;
+            color: #E0E0E0;
+            border-color: #4A4A5A;
+        }
+        .stAlert {
+            background-color: #2D2D3A;
+            color: #E0E0E0;
+        }
+        div[data-testid="stExpander"] details summary {
+            color: #E0E0E0;
+        }
+        div[data-testid="stExpander"] details {
+            background-color: #2D2D3A;
+            border-color: #4A4A5A;
+        }
+        hr {
+            border-color: #4A4A5A;
         }
     }
 </style>
@@ -484,7 +518,6 @@ if 'temp_login' not in st.session_state:
 if st.session_state.user_id is None:
     st.title("📱 DocControl Mobile")
     
-    # Показываем сообщение с логином, если было
     if st.session_state.show_login_message and st.session_state.temp_login:
         st.success(f"✅ Регистрация успешна! Ваш логин: **{st.session_state.temp_login}**")
         st.info("Сохраните этот логин для входа!")
@@ -562,7 +595,6 @@ is_admin = (st.session_state.user_login == "admin3452")
 # Верхняя панель с информацией о пользователе и кнопкой выхода
 col1, col2, col3 = st.columns([3, 2, 1])
 with col1:
-    # Отображаем ФИО в формате "Фамилия И.О."
     fio_parts = st.session_state.user_fio.split()
     if len(fio_parts) >= 3:
         display_name = f"{fio_parts[0]} {fio_parts[1][0]}.{fio_parts[2][0]}."
@@ -691,104 +723,164 @@ with tab2:
                     st.rerun()
                 
                 if st.session_state.selected_doc_id == row['id']:
-                    with st.form(key=f"edit_form_{row['id']}"):
-                        doc = conn.execute("""
-                            SELECT d.*, s.fio as executor_fio, s.department as executor_dept
-                            FROM docs d
-                            LEFT JOIN staff s ON d.with_who_login = s.login
-                            WHERE d.id = ? AND d.user_id = ?
-                        """, (row['id'], st.session_state.user_id)).fetchone()
+                    # Получаем данные документа
+                    doc = conn.execute("""
+                        SELECT d.*, s.fio as executor_fio, s.department as executor_dept
+                        FROM docs d
+                        LEFT JOIN staff s ON d.with_who_login = s.login
+                        WHERE d.id = ? AND d.user_id = ?
+                    """, (row['id'], st.session_state.user_id)).fetchone()
+                    
+                    if doc:
+                        # Блок выбора статуса (вне формы)
+                        status_options = ["В работе", "Передан", "Исполнен"]
+                        current_status = doc[11] if doc[11] else "В работе"
+                        status_index = status_options.index(current_status) if current_status in status_options else 0
+                        new_status = st.selectbox("Статус", status_options, index=status_index, key=f"status_select_{row['id']}")
                         
-                        if doc:
-                            # Статус
-                            status_options = ["В работе", "Передан", "Исполнен"]
-                            current_status = doc[11] if doc[11] else "В работе"
-                            status_index = status_options.index(current_status) if current_status in status_options else 0
-                            new_status = st.selectbox("Статус", status_options, index=status_index)
+                        # Блок выбора исполнителя (появляется только если статус "Передан")
+                        selected_login = st.session_state.user_login
+                        selected_fio = st.session_state.user_fio
+                        
+                        if new_status == "Передан":
+                            st.warning("⚠️ Выберите исполнителя для передачи документа")
+                            executor_mode = st.radio(
+                                "Способ указания исполнителя",
+                                ["Выбрать из списка", "Ввести вручную"],
+                                horizontal=True,
+                                key=f"executor_mode_{row['id']}"
+                            )
                             
-                            # Логика выбора исполнителя
+                            if executor_mode == "Выбрать из списка":
+                                staff_list = get_staff_list()
+                                if staff_list:
+                                    staff_displays = [s['display'] for s in staff_list]
+                                    current_with_who_login = doc[8] if doc[8] else st.session_state.user_login
+                                    default_display = None
+                                    for s in staff_list:
+                                        if s['login'] == current_with_who_login:
+                                            default_display = s['display']
+                                            break
+                                    default_index = 0
+                                    if default_display and default_display in staff_displays:
+                                        default_index = staff_displays.index(default_display)
+                                    with_who = st.selectbox(
+                                        "Выберите исполнителя",
+                                        staff_displays,
+                                        index=default_index,
+                                        key=f"executor_select_{row['id']}"
+                                    )
+                                    selected_login = with_who.split("(")[-1].split(")")[0].strip()
+                                    selected_fio = with_who.split("(")[0].strip()
+                                else:
+                                    st.error("Нет зарегистрированных сотрудников")
+                                    selected_login = ""
+                                    selected_fio = ""
+                            else:
+                                selected_fio = st.text_input(
+                                    "Введите фамилию и инициалы",
+                                    value=doc[9] if doc[9] else "",
+                                    placeholder="например: Сидоров П.П.",
+                                    key=f"executor_manual_{row['id']}"
+                                )
+                                selected_login = selected_fio
+                            
+                            if not selected_fio:
+                                st.error("⚠️ Укажите исполнителя для передачи документа")
+                        elif new_status == "В работе":
                             selected_login = st.session_state.user_login
                             selected_fio = st.session_state.user_fio
-                            
-                            if new_status == "Передан":
-                                st.warning("⚠️ Выберите исполнителя для передачи документа")
-                                executor_mode = st.radio("Способ указания", ["Выбрать из списка", "Ввести вручную"], horizontal=True)
-                                if executor_mode == "Выбрать из списка":
-                                    staff_list = get_staff_list()
-                                    if staff_list:
-                                        staff_displays = [s['display'] for s in staff_list]
-                                        current_with_who_login = doc[8] if doc[8] else st.session_state.user_login
-                                        default_display = None
-                                        for s in staff_list:
-                                            if s['login'] == current_with_who_login:
-                                                default_display = s['display']
-                                                break
-                                        default_index = 0
-                                        if default_display and default_display in staff_displays:
-                                            default_index = staff_displays.index(default_display)
-                                        with_who = st.selectbox("Выберите исполнителя", staff_displays, index=default_index)
-                                        selected_login = with_who.split("(")[-1].split(")")[0].strip()
-                                        selected_fio = with_who.split("(")[0].strip()
-                                    else:
-                                        st.error("Нет зарегистрированных сотрудников")
-                                else:
-                                    selected_fio = st.text_input("Введите фамилию и инициалы", value=doc[9] if doc[9] else "")
-                                    selected_login = selected_fio
-                            elif new_status == "В работе":
-                                selected_login = st.session_state.user_login
-                                selected_fio = st.session_state.user_fio
-                                st.info(f"Исполнитель: {display_name}")
-                            elif new_status == "Исполнен":
-                                change_executor = st.checkbox("Изменить исполнителя")
-                                if change_executor:
-                                    executor_mode = st.radio("Способ указания", ["Выбрать из списка", "Ввести вручную"], horizontal=True)
-                                    if executor_mode == "Выбрать из списка":
-                                        staff_list = get_staff_list()
-                                        if staff_list:
-                                            staff_displays = [s['display'] for s in staff_list]
-                                            current_with_who_login = doc[8] if doc[8] else st.session_state.user_login
-                                            default_display = None
-                                            for s in staff_list:
-                                                if s['login'] == current_with_who_login:
-                                                    default_display = s['display']
-                                                    break
-                                            default_index = 0
-                                            if default_display and default_display in staff_displays:
-                                                default_index = staff_displays.index(default_display)
-                                            with_who = st.selectbox("Выберите исполнителя", staff_displays, index=default_index)
-                                            selected_login = with_who.split("(")[-1].split(")")[0].strip()
-                                            selected_fio = with_who.split("(")[0].strip()
-                                        else:
-                                            selected_login = doc[8] if doc[8] else st.session_state.user_login
-                                            selected_fio = doc[9] if doc[9] else st.session_state.user_fio
-                                    else:
-                                        selected_fio = st.text_input("Введите фамилию и инициалы", value=doc[9] if doc[9] else "")
-                                        selected_login = selected_fio
-                                else:
-                                    selected_login = doc[8] if doc[8] else st.session_state.user_login
-                                    selected_fio = doc[9] if doc[9] else st.session_state.user_fio
-                            
-                            # Основные поля
-                            doc_number = st.text_input("Номер документа", value=doc[3] if doc[3] else "")
-                            
-                            dept_options = get_departments()
-                            current_sender = doc[5] if doc[5] else ""
-                            if current_sender in dept_options:
-                                sender_index = dept_options.index(current_sender) + 1
+                            fio_parts = st.session_state.user_fio.split()
+                            if len(fio_parts) >= 3:
+                                display_name = f"{fio_parts[0]} {fio_parts[1][0]}.{fio_parts[2][0]}."
                             else:
-                                sender_index = 0
-                            sender_select = st.selectbox("От кого поступил", options=[""] + dept_options, index=sender_index)
-                            sender_new = st.text_input("Или введите новое", value=current_sender if current_sender not in dept_options else "")
-                            sender = sender_new if sender_new else sender_select
+                                display_name = st.session_state.user_fio
+                            st.info(f"Исполнитель: {display_name}")
+                        
+                        # Форма с остальными полями
+                        with st.form(key=f"edit_form_{row['id']}"):
+                            col1, col2 = st.columns(2)
                             
-                            summary = st.text_area("Содержание", value=doc[6] if doc[6] else "", height=100)
+                            with col1:
+                                doc_number = st.text_input("Номер документа", value=doc[3] if doc[3] else "", key=f"doc_num_{row['id']}")
+                                
+                                dept_options = get_departments()
+                                current_sender = doc[5] if doc[5] else ""
+                                if current_sender in dept_options:
+                                    sender_index = dept_options.index(current_sender) + 1
+                                else:
+                                    sender_index = 0
+                                sender_select = st.selectbox(
+                                    "От кого поступил",
+                                    options=[""] + dept_options,
+                                    index=sender_index,
+                                    key=f"sender_select_{row['id']}"
+                                )
+                                sender_new = st.text_input(
+                                    "Или введите новое",
+                                    value=current_sender if current_sender not in dept_options else "",
+                                    key=f"sender_new_{row['id']}"
+                                )
+                                sender = sender_new if sender_new else sender_select
+                                
+                                summary = st.text_area("Содержание", value=doc[6] if doc[6] else "", height=100, key=f"summary_{row['id']}")
+                                
+                                current_deadline = pd.to_datetime(doc[10]).date() if doc[10] else None
+                                deadline = st.date_input(
+                                    "Срок исполнения (необязательно)",
+                                    value=current_deadline if current_deadline else None,
+                                    key=f"deadline_{row['id']}"
+                                )
                             
-                            current_deadline = pd.to_datetime(doc[10]).date() if doc[10] else None
-                            deadline = st.date_input("Срок исполнения (необязательно)", value=current_deadline if current_deadline else None)
-                            
-                            status_comment = st.text_input("Комментарий к изменению статуса")
-                            comment = st.text_area("Примечание", value=doc[13] if doc[13] else "")
-                            starred = st.checkbox("⭐ Закрепить документ", value=doc[15] == 1)
+                            with col2:
+                                # Если статус "Исполнен" — можно изменить исполнителя
+                                if new_status == "Исполнен":
+                                    change_executor = st.checkbox("Изменить исполнителя", key=f"change_executor_{row['id']}")
+                                    if change_executor:
+                                        executor_mode = st.radio(
+                                            "Способ указания",
+                                            ["Выбрать из списка", "Ввести вручную"],
+                                            horizontal=True,
+                                            key=f"executor_mode_completed_{row['id']}"
+                                        )
+                                        if executor_mode == "Выбрать из списка":
+                                            staff_list = get_staff_list()
+                                            if staff_list:
+                                                staff_displays = [s['display'] for s in staff_list]
+                                                current_with_who_login = doc[8] if doc[8] else st.session_state.user_login
+                                                default_display = None
+                                                for s in staff_list:
+                                                    if s['login'] == current_with_who_login:
+                                                        default_display = s['display']
+                                                        break
+                                                default_index = 0
+                                                if default_display and default_display in staff_displays:
+                                                    default_index = staff_displays.index(default_display)
+                                                with_who = st.selectbox(
+                                                    "Выберите исполнителя",
+                                                    staff_displays,
+                                                    index=default_index,
+                                                    key=f"executor_select_completed_{row['id']}"
+                                                )
+                                                selected_login = with_who.split("(")[-1].split(")")[0].strip()
+                                                selected_fio = with_who.split("(")[0].strip()
+                                            else:
+                                                selected_login = doc[8] if doc[8] else st.session_state.user_login
+                                                selected_fio = doc[9] if doc[9] else st.session_state.user_fio
+                                        else:
+                                            selected_fio = st.text_input(
+                                                "Введите фамилию и инициалы",
+                                                value=doc[9] if doc[9] else "",
+                                                key=f"executor_manual_completed_{row['id']}"
+                                            )
+                                            selected_login = selected_fio
+                                    else:
+                                        selected_login = doc[8] if doc[8] else st.session_state.user_login
+                                        selected_fio = doc[9] if doc[9] else st.session_state.user_fio
+                                
+                                status_comment = st.text_input("Комментарий к изменению статуса", key=f"status_comment_{row['id']}")
+                                comment = st.text_area("Примечание", value=doc[13] if doc[13] else "", key=f"comment_{row['id']}")
+                                starred = st.checkbox("⭐ Закрепить документ", value=doc[15] == 1, key=f"starred_{row['id']}")
                             
                             col_btn1, col_btn2 = st.columns(2)
                             with col_btn1:
