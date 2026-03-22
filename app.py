@@ -12,24 +12,6 @@ import tempfile
 import re
 import sys
 
-# === ОТЛАДКА ===
-class StreamToLogger:
-    def __init__(self):
-        self.logs = []
-    def write(self, message):
-        if message.strip():
-            self.logs.append(message.strip())
-    def flush(self):
-        pass
-
-logger = StreamToLogger()
-sys.stderr = logger
-sys.stdout = logger
-
-def debug_print(*args):
-    message = " ".join(str(a) for a in args)
-    logger.write(message)
-
 # --- Настройка страницы (мобильная) ---
 st.set_page_config(
     page_title="DocControl Mobile",
@@ -455,10 +437,7 @@ def get_user_docs(user_id, user_login):
         WHERE d.user_id = ? OR d.with_who_login = ?
         ORDER BY d.starred DESC, d.deadline ASC, d.reg_date DESC
     """
-    debug_print(f"[DEBUG] get_user_docs: user_id={user_id}, user_login={user_login}")
-    result = pd.read_sql(query, conn, params=(user_id, user_login))
-    debug_print(f"[DEBUG] Найдено документов: {len(result)}")
-    return result
+    return pd.read_sql(query, conn, params=(user_id, user_login))
 
 def add_document(user_id, doc_type, doc_number, reg_date, sender, summary, 
                  with_who_login, with_who_fio, deadline, comment, starred):
@@ -473,7 +452,6 @@ def add_document(user_id, doc_type, doc_number, reg_date, sender, summary,
           with_who_login, with_who_fio, datetime.now().date(), deadline_value, 
           "В работе", "", comment, 1 if starred else 0))
     conn.commit()
-    debug_print(f"[DEBUG] Добавлен документ: user_id={user_id}, with_who_login={with_who_login}, with_who_fio={with_who_fio}")
 
 def update_document(doc_id, user_id, doc_number, sender, summary, 
                     with_who_login, with_who_fio, deadline, comment, starred):
@@ -487,12 +465,12 @@ def update_document(doc_id, user_id, doc_number, sender, summary,
     """, (doc_number, sender, summary, with_who_login, with_who_fio,
           deadline_value, comment, 1 if starred else 0, doc_id, user_id))
     conn.commit()
-    debug_print(f"[DEBUG] Обновлен документ {doc_id}: with_who_login={with_who_login}, with_who_fio={with_who_fio}")
 
 def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=None, new_with_who_fio=None):
     c = conn.cursor()
     doc = c.execute("SELECT status, status_history FROM docs WHERE id=? AND user_id=?", (doc_id, user_id)).fetchone()
     if not doc:
+        st.error(f"[ОТЛАДКА] Документ {doc_id} не найден")
         return
     old_status = doc[0]
     history = doc[1] if doc[1] else ""
@@ -501,7 +479,7 @@ def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=No
     new_entry = f"{timestamp}: {old_status} → {new_status}"
     if new_status == "Передан" and new_with_who_fio:
         new_entry += f" (передан {new_with_who_fio})"
-        debug_print(f"[DEBUG] Передача документа {doc_id}: новому исполнителю {new_with_who_fio} (логин: {new_with_who_login})")
+        st.info(f"[ОТЛАДКА] Передача документа {doc_id}: {new_with_who_fio} (логин: {new_with_who_login})")
     elif comment:
         new_entry += f" ({comment})"
     updated_history = f"{history}\n{new_entry}".strip()
@@ -513,7 +491,7 @@ def update_status(doc_id, user_id, new_status, comment="", new_with_who_login=No
             with_who_login=?, with_who_fio=?
             WHERE id=? AND user_id=?
         """, (new_status, updated_history, now.date(), new_with_who_login, new_with_who_fio, doc_id, user_id))
-        debug_print(f"[DEBUG] Обновлен статус документа {doc_id}: новый статус={new_status}, исполнитель={new_with_who_fio}")
+        st.success(f"[ОТЛАДКА] Документ {doc_id} передан {new_with_who_fio}")
     else:
         c.execute("""
             UPDATE docs SET 
@@ -660,11 +638,7 @@ if is_admin:
     
     if st.session_state.get('show_debug', False):
         with st.expander("📋 Отладочные сообщения", expanded=True):
-            if logger.logs:
-                for log in logger.logs[-50:]:
-                    st.code(log, language="text")
-            else:
-                st.info("Нет сообщений")
+            st.info("Отладочные сообщения будут появляться здесь при действиях")
 
 # Кнопка синхронизации (только для админа)
 if is_admin:
@@ -764,7 +738,7 @@ with tab2:
                 else:
                     st.caption(f"👤 {row['with_who_fio'] if row['with_who_fio'] else 'Не указан'}")
                 
-                # История изменений (используем row, а не doc)
+                # История изменений
                 if row['status_history'] and row['status_history'].strip():
                     with st.expander("📜 История изменений", expanded=False):
                         for line in row['status_history'].strip().split('\n'):
@@ -937,6 +911,7 @@ with tab2:
                             col_btn1, col_btn2 = st.columns(2)
                             with col_btn1:
                                 if st.form_submit_button("💾 Сохранить", use_container_width=True):
+                                    st.info(f"[ОТЛАДКА] Статус: {new_status}, Исполнитель: {selected_fio}, Логин: {selected_login}")
                                     if new_status == "Передан" and not selected_fio:
                                         st.error("Для передачи документа необходимо указать исполнителя")
                                     else:
@@ -950,6 +925,7 @@ with tab2:
                                             update_status(doc[0], st.session_state.user_id, new_status, status_comment,
                                                         selected_login if new_status == "Передан" else None,
                                                         selected_fio if new_status == "Передан" else None)
+                                            st.success(f"[ОТЛАДКА] Статус изменен с {current_status} на {new_status}")
                                         
                                         st.success("Сохранено!")
                                         st.session_state.selected_doc_id = None
