@@ -764,7 +764,7 @@ with tab2:
                 else:
                     st.caption(f"👤 {row['with_who_fio'] if row['with_who_fio'] else 'Не указан'}")
                 
-                # История изменений
+                # История изменений (используем row, а не doc)
                 if row['status_history'] and row['status_history'].strip():
                     with st.expander("📜 История изменений", expanded=False):
                         for line in row['status_history'].strip().split('\n'):
